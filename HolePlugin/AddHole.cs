@@ -1,6 +1,7 @@
 ﻿using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Mechanical;
+using Autodesk.Revit.DB.Plumbing;
 using Autodesk.Revit.DB.Structure;
 using Autodesk.Revit.UI;
 using System;
@@ -31,7 +32,7 @@ namespace HolePlugin
                 .OfCategory(BuiltInCategory.OST_GenericModel)
                 .OfType<FamilySymbol>()
                 .Where(x => x.FamilyName.Equals("Отверстия"))
-                .FirstOrDefault();            
+                .FirstOrDefault();
             if (familySymbol == null)
             {
                 TaskDialog.Show("Ошибка", "Не найдено семейство \"Отверстия\"");
@@ -48,13 +49,21 @@ namespace HolePlugin
                 TaskDialog.Show("Ошибка", "Не найден 3D вид");
                 return Result.Cancelled;
             }
+            //создание проемов для воздуховодов
+            CreateDuctHoles(arDoc, ovDoc, familySymbol, view3D);
+            //создание проемов для труб
+            CreatePipeHoles(arDoc, ovDoc, familySymbol, view3D);
+            return Result.Succeeded;
+        }
 
+        private static void CreateDuctHoles(Document arDoc, Document ovDoc, FamilySymbol familySymbol, View3D view3D)
+        {
             //поиск воздуховодов в модели
             List<Duct> ducts = new FilteredElementCollector(ovDoc)
                 .OfClass(typeof(Duct))
                 .OfType<Duct>()
                 .ToList();
-            
+
             //поиск пересечений стен воздуховодами
             ReferenceIntersector referenceIntersector = new ReferenceIntersector(new ElementClassFilter(typeof(Wall)), FindReferenceTarget.Element, view3D);
 
@@ -63,12 +72,12 @@ namespace HolePlugin
             //активация FamilySymbol
             if (!familySymbol.IsActive)
                 familySymbol.Activate();
-            transaction0.Commit();  
+            transaction0.Commit();
 
             Transaction transaction = new Transaction(arDoc);
-            transaction.Start("Расстановка отверстий");           
+            transaction.Start("Расстановка отверстий");
             foreach (Duct d in ducts)
-            {
+            {  
                 //получение кривой проекции воздуховода
                 Line curve = (d.Location as LocationCurve).Curve as Line;
                 //получение точки начала кривой
@@ -91,7 +100,7 @@ namespace HolePlugin
                     //получение уровня на котором находится стена
                     Level level = arDoc.GetElement(wall.LevelId) as Level;
                     //получение точки вставки отверстия
-                    XYZ pointHole = point + (direction * proximity); 
+                    XYZ pointHole = point + (direction * proximity);
                     //вставка проёмов в стены
                     FamilyInstance hole = arDoc.Create.NewFamilyInstance(pointHole, familySymbol, wall, level, StructuralType.NonStructural);
                     //задание размеров проёма
@@ -102,7 +111,63 @@ namespace HolePlugin
                 }
             }
             transaction.Commit();
-            return Result.Succeeded;
+        }
+
+        private static void CreatePipeHoles(Document arDoc, Document ovDoc, FamilySymbol familySymbol, View3D view3D)
+        {
+            //поиск труб в модели
+            List<Pipe> pipes = new FilteredElementCollector(ovDoc)
+                .OfClass(typeof(Pipe))
+                .OfType<Pipe>()
+                .ToList();
+
+            //поиск пересечений стен трубами
+            ReferenceIntersector referenceIntersector = new ReferenceIntersector(new ElementClassFilter(typeof(Wall)), FindReferenceTarget.Element, view3D);
+
+            Transaction transaction0 = new Transaction(arDoc);
+            transaction0.Start("Активация FamilySymbol");
+            //активация FamilySymbol
+            if (!familySymbol.IsActive)
+                familySymbol.Activate();
+            transaction0.Commit();
+
+            Transaction transaction = new Transaction(arDoc);
+            transaction.Start("Расстановка отверстий");
+            foreach (Pipe p in pipes)
+            {
+                //получение кривой проекции трубы
+                Line curve = (p.Location as LocationCurve).Curve as Line;
+                //получение точки начала кривой
+                XYZ point = curve.GetEndPoint(0);
+                //получение вектора направления кривой
+                XYZ direction = curve.Direction;
+                //метод поиска пересечений через точку и направление
+                List<ReferenceWithContext> intersections = referenceIntersector.Find(point, direction)
+                    .Where(x => x.Proximity <= curve.Length)
+                    .Distinct(new ReferenceWithContextElementEqualityComparer()) //среди всех объектов которые совпадают по критерию осталяют один
+                    .ToList();
+                foreach (ReferenceWithContext refer in intersections)
+                {
+                    //расстояние до пересечения
+                    double proximity = refer.Proximity;
+                    //ссылка на элемент
+                    Reference reference = refer.GetReference();
+                    //получение из ссылки элемента (стены)
+                    Wall wall = arDoc.GetElement(reference.ElementId) as Wall;
+                    //получение уровня на котором находится стена
+                    Level level = arDoc.GetElement(wall.LevelId) as Level;
+                    //получение точки вставки отверстия
+                    XYZ pointHole = point + (direction * proximity);
+                    //вставка проёмов в стены
+                    FamilyInstance hole = arDoc.Create.NewFamilyInstance(pointHole, familySymbol, wall, level, StructuralType.NonStructural);
+                    //задание размеров проёма
+                    Parameter width = hole.LookupParameter("Ширина");
+                    Parameter height = hole.LookupParameter("Высота");
+                    width.Set(p.Diameter);
+                    height.Set(p.Diameter);
+                }
+            }
+            transaction.Commit();
         }
     }
     public class ReferenceWithContextElementEqualityComparer : IEqualityComparer<ReferenceWithContext>
